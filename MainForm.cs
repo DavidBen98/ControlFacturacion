@@ -9,12 +9,13 @@ using ClosedXML.Excel;
 using Tesseract;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Excel = Microsoft.Office.Interop.Excel;
 
 namespace ControlFacturacion;
    
 public sealed class MainForm : Form
 {
-    private const string ExcelPath = @"C:\Users\Lalá\Downloads\Siesta.xlsx";
+    private const string ExcelPath = @"C:\Users\Servidor\Documents\Siestas 2026.xlsx";
     private readonly Button selectButton = new() { Text = "1. Seleccionar área FACTURADO", AutoSize = true };
     private readonly Button readButton = new() { Text = "2. Leer importe", AutoSize = true, Enabled = false };
     private readonly Button save13Button = new() { Text = "Guardar como 13:00", AutoSize = true, Enabled = false };
@@ -80,25 +81,74 @@ public sealed class MainForm : Form
             automaticTimeLabel = "16:00";
         }
 
+           
+
+Shown += async (_, _) =>
+{
+    if (automaticMode)
+    {
+        ShowInTaskbar = false;
+        WindowState = FormWindowState.Minimized;
+        Hide();
+    }
+
+    try
+    {
+        // Esperar a que Servidor de sucursales esté listo.
+        await System.Threading.Tasks.Task.Delay(1800);
+
+        // Actualizar el servidor al iniciar ControlFacturacion.
+        await RefreshServerAsync();
+
+        // Si se inició en modo automático, continuar con OCR y Excel.
         if (automaticMode)
         {
-            ShowInTaskbar = false;
-            WindowState = FormWindowState.Minimized;
-            Shown += async (_, _) =>
-            {
-                Hide();
-                await System.Threading.Tasks.Task.Delay(1800);
-                RunAutomaticCapture(automaticColumn, automaticTimeLabel);
-            };
+            RunAutomaticCaptureAfterRefresh(
+                automaticColumn,
+                automaticTimeLabel);
+        }
+        else
+        {
+            statusLabel.Text =
+                "Servidor actualizado. Ya podés leer el importe.";
         }
     }
+    catch (Exception ex)
+    {
+        WriteAutomationLog(
+            $"ERROR | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Inicio | {ex.Message}");
+
+        if (automaticMode)
+            Close();
+        else
+            MessageBox.Show(
+                $"No se pudo actualizar Servidor de sucursales:\n{ex.Message}",
+                "Error de actualización",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+    }
+};
+
+ 
+}
 
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+[DllImport("oleaut32.dll", PreserveSig = true)]
+private static extern int GetActiveObject(
+    ref Guid rclsid,
+    IntPtr reserved,
+    [MarshalAs(UnmanagedType.IUnknown)] out object ppunk);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+[DllImport("user32.dll", SetLastError = true)]
+private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+private const int SW_RESTORE = 9;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct RECT
@@ -123,6 +173,82 @@ public sealed class MainForm : Form
 
         return IntPtr.Zero;
     }
+
+
+[DllImport("user32.dll", SetLastError = true)]
+private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+[DllImport("user32.dll")]
+private static extern bool SetCursorPos(int X, int Y);
+
+[DllImport("user32.dll")]
+private static extern void mouse_event(
+    uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+
+
+private static async System.Threading.Tasks.Task RefreshServerAsync()
+{
+    IntPtr hwnd = FindServerWindow();
+
+    if (hwnd == IntPtr.Zero)
+        throw new InvalidOperationException(
+            "No encontré Servidor de sucursales.");
+
+    // Minimizar Servidor.
+ShowWindow(hwnd, 6); // SW_MINIMIZE
+
+await System.Threading.Tasks.Task.Delay(1000);
+
+// Restaurar la ventana.
+ShowWindow(hwnd, SW_RESTORE);
+
+await System.Threading.Tasks.Task.Delay(1000);
+
+// Intentar poner Servidor en primer plano.
+SetForegroundWindow(hwnd);
+
+await System.Threading.Tasks.Task.Delay(700);
+
+    // Obtener las coordenadas DESPUÉS de restaurarla.
+    if (!GetWindowRect(hwnd, out RECT rect))
+        throw new InvalidOperationException(
+            "No pude obtener las dimensiones de Servidor de sucursales.");
+
+    // A partir de acá mantené tus tres clics actuales.
+// Coordenadas relativas del botón Actualizar.
+const int relativeX = 512;
+const int relativeY = 279;
+
+   // CLICK 1: primera acción previa.
+SetCursorPos(rect.Left + 200, rect.Top + 50);
+await System.Threading.Tasks.Task.Delay(200);
+mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+await System.Threading.Tasks.Task.Delay(100);
+mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+
+await System.Threading.Tasks.Task.Delay(500);
+
+// CLICK 2: segunda acción previa.
+SetCursorPos(rect.Left + 50, rect.Top + 80);
+await System.Threading.Tasks.Task.Delay(200);
+mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+await System.Threading.Tasks.Task.Delay(100);
+mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+
+await System.Threading.Tasks.Task.Delay(500);
+
+// CLICK 3: botón Actualizar.
+SetCursorPos(rect.Left + relativeX, rect.Top + relativeY);
+await System.Threading.Tasks.Task.Delay(200);
+mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
+await System.Threading.Tasks.Task.Delay(100);
+mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+}
+
 
     private Bitmap CaptureServerArea()
     {
@@ -217,27 +343,39 @@ public sealed class MainForm : Form
         catch { /* Una configuración inválida se puede reemplazar seleccionando el área de nuevo. */ }
     }
 
-    private void RunAutomaticCapture(int column, string timeLabel)
+   
+private async void RunAutomaticCapture(int column, string timeLabel)
+{
+    try
     {
-        try
-        {
-            if (selectedRegion.Width <= 0 || selectedRegion.Height <= 0)
-                throw new InvalidOperationException("No hay un área guardada. Abrí ControlFacturacion una vez y seleccioná el número FACTURADO.");
+        if (selectedRegion.Width <= 0 || selectedRegion.Height <= 0)
+            throw new InvalidOperationException(
+                "No hay un área guardada. Abrí ControlFacturacion una vez y seleccioná el importe FACTURADO.");
 
-            // Capture and OCR without showing message boxes in unattended mode.
-            decimal amount = ReadAmountForAutomation();
-            SaveToExcel(amount, column, DateTime.Today);
-            WriteAutomationLog($"OK | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | {timeLabel} | {amount.ToString(CultureInfo.InvariantCulture)}");
-        }
-        catch (Exception ex)
-        {
-            WriteAutomationLog($"ERROR | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | {timeLabel} | {ex.Message}");
-        }
-        finally
-        {
-            Close();
-        }
+        // 1. Actualizar Servidor de sucursales.
+        await RefreshServerAsync();
+
+        // 2. Leer el importe actualizado mediante OCR.
+        decimal amount = ReadAmountForAutomation();
+
+        // 3. Guardar el importe en Excel.
+        SaveToExcel(amount, column, DateTime.Today);
+
+        WriteAutomationLog(
+            $"OK | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | {amount.ToString(CultureInfo.InvariantCulture)}");
     }
+    catch (Exception ex)
+    {
+        WriteAutomationLog(
+            $"ERROR | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | {ex.Message}");
+    }
+    finally
+    {
+        Close();
+    }
+}
 
     private decimal ReadAmountForAutomation()
     {
@@ -435,30 +573,303 @@ public sealed class MainForm : Form
         }
     }
 
-    private static void SaveToExcel(decimal amount, int column, DateTime date)
-    {
-        if (!File.Exists(ExcelPath))
-            throw new FileNotFoundException("No encontré el archivo en la ruta configurada.", ExcelPath);
 
-        using var workbook = new XLWorkbook(ExcelPath);
-        var sheet = workbook.Worksheets.FirstOrDefault(w => w.Name == "Hoja1")
-            ?? throw new InvalidOperationException("No encontré la hoja Hoja1 dentro del Excel.");
-        int row = 0;
-        for (int r = 1; r <= sheet.LastRowUsed().RowNumber(); r++)
+private void RunAutomaticCaptureAfterRefresh(
+    int column, string timeLabel)
+{
+    try
+    {
+        if (selectedRegion.Width <= 0 || selectedRegion.Height <= 0)
+            throw new InvalidOperationException(
+                "No hay un área OCR guardada.");
+
+        decimal amount = ReadAmountForAutomation();
+
+        SaveToExcel(amount, column, DateTime.Today);
+
+        WriteAutomationLog(
+            $"OK | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | " +
+            $"{amount.ToString(CultureInfo.InvariantCulture)}");
+    }
+    catch (Exception ex)
+    {
+        WriteAutomationLog(
+            $"ERROR | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | {ex.Message}");
+    }
+    finally
+    {
+        Close();
+    }
+}
+
+    
+
+
+
+
+private static void SaveToExcel(decimal amount, int column, DateTime date)
+{
+    if (!File.Exists(ExcelPath))
+        throw new FileNotFoundException(
+            "No encontré el archivo Excel configurado.",
+            ExcelPath);
+
+    object? excelObject = null;
+    object? booksObject = null;
+    object? workbookObject = null;
+    object? sheetsObject = null;
+    object? sheetObject = null;
+    object? usedRangeObject = null;
+    object? targetCellObject = null;
+
+    bool createdExcelInstance = false;
+    bool openedWorkbook = false;
+
+    try
+    {
+        // 1. Intentar conectarse a una instancia existente de Excel.
+        Guid excelClsid = new Guid(
+            "00024500-0000-0000-C000-000000000046");
+
+        int hr = GetActiveObject(
+            ref excelClsid,
+            IntPtr.Zero,
+            out excelObject!);
+
+        if (hr == 0 && excelObject != null)
         {
-            if (sheet.Cell(r, 2).TryGetValue<DateTime>(out var sheetDate) && sheetDate.Date == date.Date)
+            // Excel ya estaba ejecutándose.
+            // Esta instancia no debe cerrarse al terminar.
+            dynamic app = excelObject;
+            booksObject = app.Workbooks;
+        }
+        else
+        {
+            // No se encontró una instancia accesible.
+            // Crear una instancia propia.
+            Type? excelType = Type.GetTypeFromProgID(
+                "Excel.Application");
+
+            if (excelType == null)
+                throw new InvalidOperationException(
+                    "No se encontró Microsoft Excel instalado.");
+
+            excelObject = Activator.CreateInstance(excelType);
+
+            if (excelObject == null)
+                throw new InvalidOperationException(
+                    "No se pudo iniciar Excel.");
+
+            createdExcelInstance = true;
+
+            dynamic app = excelObject;
+            app.Visible = false;
+            booksObject = app.Workbooks;
+        }
+
+        dynamic books = booksObject!;
+
+        string expectedPath = Path.GetFullPath(ExcelPath);
+
+        // 2. Buscar el archivo en la instancia de Excel elegida.
+        int bookCount = (int)books.Count;
+
+        for (int i = 1; i <= bookCount; i++)
+        {
+            object? candidateObject = null;
+
+            try
             {
-                row = r;
-                break;
+                candidateObject = books.Item(i);
+
+                dynamic candidate = candidateObject!;
+
+                string fullName = Path.GetFullPath(
+                    (string)candidate.FullName);
+
+                if (string.Equals(
+                    fullName,
+                    expectedPath,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    workbookObject = candidateObject;
+                    candidateObject = null;
+                    break;
+                }
+            }
+            finally
+            {
+                // Liberar solamente los libros que no son el objetivo.
+                if (candidateObject != null)
+                    Marshal.ReleaseComObject(candidateObject);
             }
         }
-        if (row == 0)
-            throw new InvalidOperationException($"No hay una fila para la fecha {date:dd/MM/yyyy} en la columna B de Hoja1.");
 
-        sheet.Cell(row, column).Value = amount;
-        sheet.Cell(row, column).Style.NumberFormat.Format = "#,##0.00";
+        // 3. Abrir el archivo únicamente si no estaba abierto
+        // en esta instancia de Excel.
+        if (workbookObject == null)
+        {
+            workbookObject = books.Open(ExcelPath);
+            openedWorkbook = true;
+        }
+
+        dynamic workbook = workbookObject!;
+
+        // 4. Obtener Hoja1 y su rango utilizado.
+        sheetsObject = workbook.Worksheets;
+
+        dynamic sheets = sheetsObject!;
+
+        sheetObject = sheets.Item("Hoja1");
+
+        dynamic sheet = sheetObject!;
+
+        usedRangeObject = sheet.UsedRange;
+
+        dynamic usedRange = usedRangeObject!;
+
+        int firstRow = (int)usedRange.Row;
+        int firstCol = (int)usedRange.Column;
+
+        int lastRow =
+            firstRow + (int)usedRange.Rows.Count - 1;
+
+        int lastCol =
+            firstCol + (int)usedRange.Columns.Count - 1;
+
+        int dateRow = 0;
+        int dateColumn = 0;
+
+        // 5. Buscar la fecha indicada en toda la hoja.
+        for (int r = firstRow;
+             r <= lastRow && dateRow == 0;
+             r++)
+        {
+            for (int c = firstCol; c <= lastCol; c++)
+            {
+                object? value = sheet.Cells[r, c].Value2;
+
+                if (value is not double serial ||
+                    serial < 1 ||
+                    serial > DateTime.MaxValue.ToOADate())
+                {
+                    continue;
+                }
+
+                DateTime cellDate;
+
+                try
+                {
+                    cellDate = DateTime.FromOADate(serial);
+                }
+                catch (ArgumentException)
+                {
+                    continue;
+                }
+
+                if (cellDate.Date == date.Date)
+                {
+                    dateRow = r;
+                    dateColumn = c;
+                    break;
+                }
+            }
+        }
+
+        if (dateRow == 0)
+        {
+            throw new InvalidOperationException(
+                $"No se encontró la fecha {date:dd/MM/yyyy} en Hoja1.");
+        }
+
+        // 6. Calcular la columna de destino.
+        int offset = column switch
+        {
+            3 => 1, // 13:00
+            4 => 2, // 16:00
+            _ => throw new InvalidOperationException(
+                $"Horario no válido: {column}.")
+        };
+
+        targetCellObject = sheet.Cells[
+            dateRow, dateColumn + offset];
+
+        dynamic targetCell = targetCellObject!;
+
+        // 7. Escribir el importe y aplicar el formato monetario.
+        targetCell.Value2 = (double)amount;
+
+        targetCell.NumberFormat =
+            "_(\"$\"* #,##0.00_);_(\"$\"* (#,##0.00);_(\"$\"* \"-\"??_);_(@_)";
+
+        // 8. Guardar los cambios.
         workbook.Save();
     }
+    finally
+    {
+        // Liberar las referencias auxiliares.
+        if (targetCellObject != null)
+            Marshal.ReleaseComObject(targetCellObject);
+
+        if (usedRangeObject != null)
+            Marshal.ReleaseComObject(usedRangeObject);
+
+        if (sheetObject != null)
+            Marshal.ReleaseComObject(sheetObject);
+
+        if (sheetsObject != null)
+            Marshal.ReleaseComObject(sheetsObject);
+
+        // Cerrar solo el libro que abrió este método.
+        if (openedWorkbook && workbookObject != null)
+        {
+            try
+            {
+                ((dynamic)workbookObject).Close(false);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(workbookObject);
+                workbookObject = null;
+            }
+        }
+        else if (workbookObject != null)
+        {
+            // Si ya estaba abierto, liberar la referencia COM,
+            // sin cerrar el libro.
+            Marshal.ReleaseComObject(workbookObject);
+            workbookObject = null;
+        }
+
+        if (booksObject != null)
+        {
+            Marshal.ReleaseComObject(booksObject);
+            booksObject = null;
+        }
+
+        // Cerrar Excel solo si esta ejecución creó la instancia.
+        if (createdExcelInstance && excelObject != null)
+        {
+            try
+            {
+                ((dynamic)excelObject).Quit();
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(excelObject);
+                excelObject = null;
+            }
+        }
+        else if (excelObject != null)
+        {
+            // Si Excel ya estaba abierto, no ejecutar Quit().
+            Marshal.ReleaseComObject(excelObject);
+            excelObject = null;
+        }
+    }
+}
 
     private void CheckSchedule()
     {
@@ -470,11 +881,13 @@ public sealed class MainForm : Form
         }
         if (now.Hour == 13 && now.Minute == 0 && !saved13Today)
         {
-            saved13Today = true; TryScheduledSave(3, "13:00");
+            saved13Today = true;
+_ = TryScheduledSave(3, "13:00");
         }
         if (now.Hour == 16 && now.Minute == 0 && !saved16Today)
         {
-            saved16Today = true; TryScheduledSave(4, "16:00");
+            saved16Today = true;
+_ = TryScheduledSave(4, "16:00");
         }
         if (now.Hour == 0 && now.Minute == 0)
         {
@@ -483,27 +896,53 @@ public sealed class MainForm : Form
         }
     }
 
-    private bool TryScheduledSave(int column, string timeLabel)
+    
+private async System.Threading.Tasks.Task<bool> TryScheduledSave(
+    int column, string timeLabel)
+{
+    try
     {
-        try
-        {
-            if (selectedRegion.Width <= 0 || selectedRegion.Height <= 0)
-                throw new InvalidOperationException("No seleccionaste el área FACTURADO.");
-            // At the scheduled time, capture and OCR the current screen directly.
-            ReadAmount();
-            if (lastAmount is null || lastReadDate.Date != DateTime.Today)
-                throw new InvalidOperationException("No se obtuvo una lectura válida para hoy.");
-            SaveToExcel(lastAmount.Value, column, DateTime.Today);
-            statusLabel.Text = $"Guardado automático de {timeLabel} completado.";
-            return true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"No se pudo guardar automáticamente a las {timeLabel}:\n{ex.Message}", "Error de guardado automático", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
+        if (selectedRegion.Width <= 0 || selectedRegion.Height <= 0)
+            throw new InvalidOperationException(
+                "No seleccionaste el área FACTURADO.");
+
+        // 1. Actualizar Servidor de sucursales.
+        await RefreshServerAsync();
+
+        // 2. Leer el importe actualizado mediante OCR.
+        decimal amount = ReadAmountForAutomation();
+
+        // 3. Guardar el importe en Excel.
+        SaveToExcel(amount, column, DateTime.Today);
+
+        lastAmount = amount;
+        lastReadDate = DateTime.Today;
+
+        statusLabel.Text =
+            $"Guardado automático de {timeLabel} completado.";
+
+        WriteAutomationLog(
+            $"OK | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | {amount.ToString(CultureInfo.InvariantCulture)}");
+
+        return true;
+    }
+    catch (Exception ex)
+    {
+        WriteAutomationLog(
+            $"ERROR | {DateTime.Now:yyyy-MM-dd HH:mm:ss} | " +
+            $"{timeLabel} | {ex.Message}");
+
+        MessageBox.Show(
+            $"No se pudo guardar automáticamente a las {timeLabel}:\n{ex.Message}",
+            "Error de guardado automático",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
+
+        return false;
     }
 }
+
 
 internal sealed class RegionSelector : Form
 {
@@ -561,4 +1000,5 @@ internal sealed class RegionSelector : Form
         using var brush = new SolidBrush(Color.White);
         e.Graphics.DrawString("Arrastrá para seleccionar solamente el número FACTURADO. ESC para cancelar.", Font, brush, 20, 20);
     }
+}
 }
